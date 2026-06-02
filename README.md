@@ -15,7 +15,8 @@ python -m venv venv
 source venv/bin/activate  
 No Windows: venv\Scripts\activate
 
-Instalar dependências
+Instalar dependências:
+
 pip install -r requirements.txt
 
 Configurar variáveis de ambiente (Crucial)
