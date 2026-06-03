@@ -55,7 +55,7 @@ class PrevisionEngine:
     # MUDANÇA: O método agora retorna um DataFrame contendo o relatório de auditoria
     def analisar_e_agir(self, df: pd.DataFrame) -> pd.DataFrame:
         
-        # --- MELHORIA 1: VALIDAÇÃO DEFENSIVA (FAIL-FAST) ---
+        # (FAIL-FAST)
         colunas_obrigatorias = ['id_produto', 'nome', 'email_fornecedor']
         for col in colunas_obrigatorias:
             if col not in df.columns:
@@ -65,7 +65,7 @@ class PrevisionEngine:
         prompt = f"Analise o inventário (Mês 12). Dados: {df.to_json(orient='records')}"
         response = None
         
-        # --- MELHORIA 2: MECANISMO DE TENTATIVAS (RETRIES) ---
+        # (RETRIES)
         max_tentativas = 3
         for tentativa in range(1, max_tentativas + 1):
             try:
@@ -86,8 +86,7 @@ class PrevisionEngine:
                 else:
                     logging.critical("Todas as tentativas de comunicação com a IA falharam.")
                     raise e
-        
-        # --- MELHORIA 3: GERAÇÃO DE HISTÓRICO (AUDITORIA) ---
+        # (AUDITORIA)
         dados_auditoria = []  # Lista temporária para salvar as decisões
         
         try:
@@ -124,7 +123,6 @@ class PrevisionEngine:
         # Retorna o relatório final transformado em uma tabela do Pandas
         return pd.DataFrame(dados_auditoria)
 
-# --- Fluxo de execução ---
 if __name__ == "__main__":
     # Exemplo de uso ativando o modo Dry-Run para testes seguros:
     app = PrevisionEngine(api_key=os.getenv("GEMINI_API_KEY", ""), dry_run=True)
