@@ -1,0 +1,413 @@
+Tutorial pra atualização 1.2 (Prevision Engine JUPD)
+
+Antes de rodar o código, precisamos instalar as novas ferramentas que vão transformar seu script em um servidor web acessível pelo navegador. Abra o terminal do seu computador e execute o seguinte comando:
+
+pip install fastapi uvicorn pandas google-genai pydantic
+
+fastapi: O framework que cria os pontos de acesso (endpoints) para o site conversar com o Python.
+uvicorn: O servidor de aplicação ultraveloz que manterá nosso backend rodando em tempo real na porta 8000.
+
+Crie um arquivo chamado server.py e insira o código abaixo. Note que preservamos toda a lógica da versão 1.1 da classe PrevisionEngine, mas injetamos o FastAPI e um novo método exclusivo chamado responder_duvida com instruções de sistema severas para o Gemini agir como um computador de bordo logístico.
+
+============================================================================
+
+import os
+import smtplib
+import logging
+import json
+import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from typing import List
+import pandas as pd
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+
+# Importações exclusivas da nova camada de API
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+# Configuração de Logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+
+# --- MODELOS DE DADOS (CONTRATOS) ---
+class DecisaoProduto(BaseModel):
+    id_produto: int
+    acao: str = Field(description="Ação: 'COMPRAR', 'PROMOÇÃO', ou 'MANTER'")
+    quantidade_comprar: int = Field(default=0)
+    justificativa: str = Field(description="Análise técnica baseada em dados.")
+
+class RespostaIA(BaseModel):
+    analise_produtos: List[DecisaoProduto]
+
+class RequisicaoChat(BaseModel):
+    pergunta: str
+
+# --- MOTOR LOGÍSTICO REFORÇADO ---
+class PrevisionEngine:
+    def __init__(self, api_key: str, dry_run: bool = False):
+        self.client = genai.Client(api_key=api_key)
+        self.remetente = os.getenv("PREVISION_EMAIL_USER")
+        self.senha = os.getenv("PREVISION_EMAIL_PASSWORD")
+        self.dry_run = dry_run
+        logging.info(f"Motor Prevision v1.2 ativado. Modo Dry-Run: {self.dry_run}")
+
+    def _disparar_email(self, email_fornecedor: str, nome: str, qtd: int):
+        if not self.remetente or not self.senha:
+            logging.warning(f"SMTP não configurado. Simulação: {qtd}x {nome} para {email_fornecedor}")
+            return
+        msg = MIMEMultipart()
+        msg['From'], msg['To'] = self.remetente, email_fornecedor
+        msg['Subject'] = f"Ordem de Compra: {nome}"
+        corpo = f"Prezado, solicitamos a reposição de {qtd} unidades de {nome}."
+        msg.attach(MIMEText(corpo, 'plain'))
+        try:
+            with smtplib.SMTP(os.getenv("PREVISION_SMTP_SERVER", "smtp.gmail.com"), 587) as server:
+                server.starttls()
+                server.login(self.remetente, self.senha)
+                server.sendmail(self.remetente, email_fornecedor, msg.as_string())
+            logging.info(f"📧 E-mail disparado para {email_fornecedor}")
+        except Exception as e:
+            logging.error(f"Erro SMTP: {e}")
+
+    def analisar_e_agir(self, df: pd.DataFrame) -> pd.DataFrame:
+        colunas_obrigatorias = ['id_produto', 'nome', 'email_fornecedor']
+        for col in colunas_obrigatorias:
+            if col not in df.columns:
+                raise ValueError(f"A tabela fornecida precisa conter a coluna: '{col}'")
+        
+        prompt = f"Analise o inventário (Mês 12). Dados: {df.to_json(orient='records')}"
+        response = None
+        max_tentativas = 3
+        for tentativa in range(1, max_tentativas + 1):
+            try:
+                response = self.client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=RespostaIA,
+                        temperature=0.1
+                    )
+                )
+                break
+            except Exception as e:
+                if tentativa == max_tentativas: raise e
+                time.sleep(2)
+        
+        dados_auditoria = []
+        try:
+            decisoes = json.loads(response.text)['analise_produtos']
+            for d in decisoes:
+                item = df[df['id_produto'] == d['id_produto']].iloc[0]
+                registro = {
+                    "id_produto": d['id_produto'], "nome_produto": item['nome'],
+                    "acao_proposta": d['acao'], "quantidade": d['quantidade_comprar'],
+                    "justificativa": d['justificativa'], "email_enviado": False
+                }
+                if d['acao'] == 'COMPRAR' and d['quantidade_comprar'] > 0:
+                    if self.dry_run:
+                        logging.info(f"⚠️ [DRY-RUN] Compra simulada: {item['nome']}")
+                    else:
+                        self._disparar_email(item['email_fornecedor'], item['nome'], d['quantidade_comprar'])
+                        registro["email_enviado"] = True
+                dados_auditoria.append(registro)
+        except Exception as e:
+            raise e
+        return pd.DataFrame(dados_auditoria)
+
+    # NOVO MÉTODO: Interface de Consulta Inteligente Estrita (Modo Jarvis)
+    def responder_duvida(self, df: pd.DataFrame, pergunta: str) -> str:
+        contexto_inventario = df.to_json(orient='records')
+        instrucao_sistema = (
+            "Você é o Jarvis, o computador de bordo e inteligência analítica de estoque da empresa. "
+            "Seu único propósito é responder perguntas técnicas e diretas sobre o inventário fornecido. "
+            "Seja preciso, frio, use terminologias ágeis e não invente dados. "
+            "Se a pergunta não puder ser respondida com base no inventário ou fugir do escopo logístico, "
+            "responda textualmente: 'Parâmetro fora do escopo de análise de dados atual. Solicitação negada.'"
+        )
+        prompt_final = f"Inventário Atual: {contexto_inventario}\n\nPergunta do Operador: {pergunta}"
+        
+        try:
+            response = self.client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_final,
+                config=types.GenerateContentConfig(
+                    system_instruction=instrucao_sistema,
+                    temperature=0.1
+                )
+            )
+            return response.text
+        except Exception as e:
+            logging.error(f"Falha na consulta Jarvis: {e}")
+            return "Erro interno de comunicação com a matriz cognitiva."
+
+# --- INICIALIZAÇÃO DA API E DADOS DE SIMULAÇÃO ---
+api_app = FastAPI(title="Prevision OS - Jarvis Interface")
+
+# Permite que a interface HTML acesse o backend sem bloqueios de segurança (CORS)
+api_app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+)
+
+# Instanciação global do motor com uma chave recuperada do sistema
+motor = PrevisionEngine(api_key=os.getenv("GEMINI_API_KEY", "SUA_CHAVE_AQUI"), dry_run=True)
+
+# Base de dados em memória simulando o banco de dados de produção da empresa
+inventario_global = pd.DataFrame({
+    'id_produto': [101, 102, 103],
+    'nome': ['Parafuso Alen M6', 'Chave de Fenda Cross', 'Fita Isolante Industrial'],
+    'estoque_atual': [15, 120, 4],
+    'consumo_mensal': [80, 30, 25],
+    'email_fornecedor': ['metalurgica@email.com', 'ferramentas@email.com', 'suprimentos@email.com']
+})
+
+# --- ROTAS DA API (ENDPOINTS) ---
+@api_app.get("/")
+def carregar_interface():
+    """Entrega a interface visual diretamente ao acessar o endereço do servidor."""
+    return FileResponse("index.html")
+
+@api_app.post("/api/jarvis")
+def endpoint_chat(requisicao: RequisicaoChat):
+    """Ponto de entrada para as perguntas feitas pelo painel tático."""
+    resposta_texto = motor.responder_duvida(inventario_global, requisicao.pergunta)
+    return {"resposta": resposta_texto}
+
+if __name__ == "__main__":
+    import uvicorn
+    # Executa o servidor local na porta 8000
+    uvicorn.run(api_app, host="127.0.0.1", port=8000)
+
+============================================================================
+
+Crie um arquivo chamado index.html exatamente na mesma pasta do arquivo anterior. Este código implementa a estética ultra-minimalista escura com detalhes neon e efeitos visuais imersivos que discutimos, modelo teste abaixo:
+
+============================================================================
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PREVISION OS - TERMINAL COGNITIVO</title>
+    <style>
+        :root {
+            --bg-color: #060913;
+            --panel-color: #0d1527;
+            --neon-glow: #00f3ff;
+            --text-main: #cbd5e1;
+            --text-dim: #64748b;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        /* Container Principal com Estética de Monitor Militar */
+        .mainframe {
+            width: 100%;
+            max-width: 850px;
+            height: 90vh;
+            background-color: var(--panel-color);
+            border: 1px solid var(--neon-glow);
+            box-shadow: 0 0 15px rgba(0, 243, 255, 0.15);
+            display: flex;
+            flex-direction: column;
+            border-radius: 4px;
+        }
+
+        /* Cabeçalho do Terminal */
+        .hud-header {
+            padding: 15px;
+            border-bottom: 1px solid rgba(0, 243, 255, 0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(0, 243, 255, 0.02);
+        }
+
+        .hud-title {
+            color: var(--neon-glow);
+            font-weight: bold;
+            font-size: 14px;
+            letter-spacing: 2px;
+        }
+
+        .hud-status {
+            font-size: 11px;
+            color: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        /* Caixa Central de Mensagens */
+        .terminal-screen {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .log-entry {
+            font-size: 13px;
+            line-height: 1.6;
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        .log-entry.operator {
+            color: var(--text-dim);
+        }
+
+        .log-entry.jarvis {
+            color: var(--text-main);
+            border-left: 2px solid var(--neon-glow);
+            padding-left: 10px;
+        }
+
+        .jarvis-tag {
+            color: var(--neon-glow);
+            font-weight: bold;
+        }
+
+        /* Rodapé com Input de Linha de Comando */
+        .input-area {
+            padding: 15px;
+            border-top: 1px solid rgba(0, 243, 255, 0.2);
+            display: flex;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        .cmd-input {
+            flex: 1;
+            background: transparent;
+            border: 1px solid rgba(0, 243, 255, 0.3);
+            padding: 12px;
+            color: var(--neon-glow);
+            font-family: inherit;
+            font-size: 13px;
+            border-radius: 2px;
+            outline: none;
+            transition: border 0.3s;
+        }
+
+        .cmd-input:focus {
+            border-color: var(--neon-glow);
+            box-shadow: 0 0 8px rgba(0, 243, 255, 0.2);
+        }
+
+        .cmd-btn {
+            background: rgba(0, 243, 255, 0.1);
+            border: 1px solid var(--neon-glow);
+            color: var(--neon-glow);
+            padding: 0 25px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+
+        .cmd-btn:hover {
+            background: var(--neon-glow);
+            color: var(--bg-color);
+            box-shadow: 0 0 10px var(--neon-glow);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="mainframe">
+        <div class="hud-header">
+            <div class="hud-title">PREVISION SYSTEM // COGNITIVE INTERFACE v1.2</div>
+            <div class="hud-status">● INTELLIGENCE ONLINE</div>
+        </div>
+        
+        <div class="terminal-screen" id="screen">
+            <div class="log-entry jarvis">
+                <span class="jarvis-tag">[JARVIS]</span> Terminal inicializado com sucesso. Aguardando diretivas de inventário do operador técnico...
+            </div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" class="cmd-input" id="userInput" placeholder="Insira seu questionamento logístico..." autocomplete="off">
+            <button class="cmd-btn" id="sendBtn">Executar</button>
+        </div>
+    </div>
+
+    <script>
+        const screen = document.getElementById('screen');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+
+        async function enviarMensagem() {
+            const texto = userInput.value.trim();
+            if (!texto) return;
+
+            // 1. Limpa o input e exibe a mensagem do operador na tela
+            userInput.value = '';
+            const opEntry = document.createElement('div');
+            opEntry.className = 'log-entry operator';
+            opEntry.innerText = `> OPERADOR: ${texto}`;
+            screen.appendChild(opEntry);
+            screen.scrollTop = screen.scrollHeight;
+
+            // 2. Exibe indicador de processamento temporário do Jarvis
+            const jEntry = document.createElement('div');
+            jEntry.className = 'log-entry jarvis';
+            jEntry.innerHTML = `<span class="jarvis-tag">[JARVIS]</span> <span style="color: #64748b">Processando matriz de dados...</span>`;
+            screen.appendChild(jEntry);
+            screen.scrollTop = screen.scrollHeight;
+
+            try {
+                // 3. Faz a requisição assíncrona em segundo plano para o nosso backend Python
+                const response = await fetch('http://127.0.0.1:8000/api/jarvis', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pergunta: texto })
+                });
+                
+                const data = await response.json();
+                
+                // 4. Substitui o indicador de carregamento pela resposta exata da IA
+                jEntry.innerHTML = `<span class="jarvis-tag">[JARVIS]</span> ${data.resposta}`;
+            } catch (error) {
+                jEntry.innerHTML = `<span class="jarvis-tag">[JARVIS]</span> <span style="color: #ef4444">FALHA CRÍTICA: Não foi possível estabelecer conexão com o núcleo do servidor local.</span>`;
+            }
+            screen.scrollTop = screen.scrollHeight;
+        }
+
+        // Eventos de gatilho para o botão e para a tecla 'Enter'
+        sendBtn.addEventListener('click', enviarMensagem);
+        userInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') enviarMensagem(); });
+    </script>
+</body>
+</html>
+
+============================================================================
